@@ -16,7 +16,6 @@ import { buildIndex } from './indexer.js';
 import { findRelevantFiles } from './matcher.js';
 import { enhancePrompt } from './enhancer.js';
 import { loadConfig, saveConfig, setProjectPath, getProjectPath } from './config.js';
-import { startWatcher } from './watcher.js';
 import { setupProject } from './setup-project.js';
 
 // ─────────────────────────────────────────
@@ -91,9 +90,6 @@ function printHelp() {
   console.log('');
   console.log(chalk.cyan('  enhance --init --force'));
   console.log(chalk.gray('    → Force rebuild index from scratch'));
-  console.log('');
-  console.log(chalk.cyan('  enhance --watch'));
-  console.log(chalk.gray('    → Watch project for changes, auto re-index on save'));
   console.log('');
   console.log(chalk.cyan('  enhance --setup /path/to/project'));
   console.log(chalk.gray('    → Add /enhance slash command to a project (one time)'));
@@ -265,11 +261,6 @@ async function main() {
     process.exit(0);
   }
 
-  // --watch — auto re-index on file change
-  if (args[0] === '--watch') {
-    await startWatcher();
-    return; // watcher runs until Ctrl+C
-  }
 
   // --setup — add /enhance command to a project
   if (args[0] === '--setup') {

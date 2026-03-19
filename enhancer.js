@@ -2,14 +2,16 @@
  * enhancer.js
  * -----------
  * Takes raw prompt + matched file contexts.
- * Makes a single Claude Code CLI call that:
- *   1. Semantically selects the most relevant files
- *   2. Generates the enhanced prompt grounded in real codebase context
- * 
- * Returns enhanced prompt string.
+ * Calls Claude Code via spawn + stdin (same pattern as indexer.js)
+ * for true async non-blocking execution.
+ *
+ * Using spawn instead of execSync:
+ *   - Non-blocking — doesn't freeze the process
+ *   - No shell argument length limits
+ *   - Same pattern that achieves true parallelism in indexer.js
  */
 
-import { execSync } from 'child_process';
+import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -29,7 +31,7 @@ function loadSystemPrompt() {
 }
 
 // ─────────────────────────────────────────
-// Build Full Prompt For Claude
+// Build Full Prompt
 // ─────────────────────────────────────────
 
 function buildFullPrompt(systemPrompt, rawPrompt, codebaseContext) {
@@ -53,46 +55,65 @@ OUTPUT: Enhanced prompt only. No explanation. No preamble.
 }
 
 // ─────────────────────────────────────────
-// Call Claude Code CLI
+// Call Claude via spawn + stdin
+// Same pattern as indexer.js askClaudeSpawn
 // ─────────────────────────────────────────
 
 function callClaude(fullPrompt) {
-  try {
-    const result = execSync(
-      `claude -p ${JSON.stringify(fullPrompt)}`,
-      {
-        encoding: 'utf8',
-        timeout: 60000, // 60s max
-        stdio: ['pipe', 'pipe', 'pipe'],
+  return new Promise((resolve) => {
+    let stdout = '';
+    let timedOut = false;
+
+    const child = spawn('claude', ['-p', '-'], {
+      shell: true,
+      windowsHide: true,
+    });
+
+    // 60s timeout
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill(); } catch {}
+      resolve({ success: false, error: 'Claude call timed out after 60s' });
+    }, 60000);
+
+    // Write prompt to stdin
+    child.stdin.write(fullPrompt, 'utf8');
+    child.stdin.end();
+
+    child.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (timedOut) return;
+
+      const output = stdout.trim();
+
+      if (!output) {
+        resolve({ success: false, error: 'Claude returned empty output' });
+        return;
       }
-    );
-    return { success: true, output: result.trim() };
-  } catch (err) {
-    const stderr = err.stderr || '';
-    const stdout = err.stdout || '';
 
-    // Claude sometimes exits non-zero but still returns output
-    if (stdout.trim().length > 0) {
-      return { success: true, output: stdout.trim() };
-    }
+      resolve({ success: true, output });
+    });
 
-    return {
-      success: false,
-      error: stderr || err.message || 'Claude CLI call failed',
-    };
-  }
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      resolve({ success: false, error: err.message });
+    });
+  });
 }
 
 // ─────────────────────────────────────────
-// Handle NEEDS_MORE_CONTEXT response
+// Parse Claude output
 // ─────────────────────────────────────────
 
 function parseOutput(output) {
   if (output.startsWith('NEEDS_MORE_CONTEXT:')) {
-    const question = output.replace('NEEDS_MORE_CONTEXT:', '').trim();
     return {
       type: 'needs_context',
-      question,
+      question: output.replace('NEEDS_MORE_CONTEXT:', '').trim(),
       enhanced: null,
     };
   }
@@ -109,7 +130,6 @@ function parseOutput(output) {
 // ─────────────────────────────────────────
 
 export async function enhancePrompt(rawPrompt, codebaseContext) {
-  // Load system prompt
   let systemPrompt;
   try {
     systemPrompt = loadSystemPrompt();
@@ -117,20 +137,13 @@ export async function enhancePrompt(rawPrompt, codebaseContext) {
     return { success: false, error: err.message };
   }
 
-  // Build the full prompt
   const fullPrompt = buildFullPrompt(systemPrompt, rawPrompt, codebaseContext);
-
-  // Call Claude
-  const result = callClaude(fullPrompt);
+  const result = await callClaude(fullPrompt);
 
   if (!result.success) {
-    return {
-      success: false,
-      error: result.error,
-    };
+    return { success: false, error: result.error };
   }
 
-  // Parse output
   const parsed = parseOutput(result.output);
 
   return {
