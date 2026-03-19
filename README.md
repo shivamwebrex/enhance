@@ -122,9 +122,6 @@ enhance --init
 # Force rebuild index from scratch
 enhance --init --force
 
-# Watch for file changes and auto re-index
-enhance --watch
-
 # Enhance a prompt directly
 enhance "your raw prompt"
 
@@ -139,17 +136,7 @@ enhance --set-project /path/to/project
 
 ## Keeping The Index Fresh
 
-### Option A — Manual (simple)
 Re-run `enhance --init` after significant code changes.
-
-### Option B — Watch mode (automatic)
-Run this in a separate terminal while you work:
-
-```bash
-enhance --watch
-```
-
-Any file you save → automatically re-indexed in ~2 seconds.
 
 ---
 
@@ -178,7 +165,6 @@ prompt-enhancer/
   matcher.js        Two-layer RAG: keyword + semantic search
   embedder.js       Local embedding model (all-MiniLM-L6-v2)
   enhancer.js       Claude Code call — generates enhanced prompt
-  watcher.js        File watcher — auto re-indexes on save
   setup-project.js  Adds /enhance command to any project
   system_prompt.txt Enhancement rules — tune this for better output
   CLAUDE.md         Template for project roots
@@ -256,4 +242,3 @@ Check `.claude/commands/enhance.md` exists in the project root.
 
 **Index takes too long**
 Normal on first run. Subsequent runs only re-index changed files.
-Use `enhance --watch` to keep it fresh incrementally.
