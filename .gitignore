@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Local model cache (30MB — no need to commit, re-downloads automatically)
+.model-cache/
+
+# Codebase index (machine-specific — each developer generates their own)
+context_index.json
+
+# Personal config (each developer sets their own project path)
+config.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
