@@ -40,7 +40,7 @@ const MAX_FILE_SIZE_KB = 100;
 // Step 1: Extract structure from file (no Claude)
 // ─────────────────────────────────────────
 
-function extractFileStructure(filePath, content) {
+export function extractFileStructure(filePath, content) {
   const lines = content.split('\n');
   const extracted = {
     path: filePath,
@@ -111,7 +111,7 @@ function extractFileStructure(filePath, content) {
 // Step 2: Ask Claude for semantic summary
 // ─────────────────────────────────────────
 
-function buildFallbackSummary(extracted) {
+export function buildFallbackSummary(extracted) {
   return {
     summary: `File with functions: ${extracted.functions.slice(0, 3).join(', ') || 'unknown'}`,
     keywords: [
@@ -134,7 +134,7 @@ function buildFallbackSummary(extracted) {
 //   spawn + stdin = process reads its own pipe, fully independent
 // ─────────────────────────────────────────
 
-function askClaudeSpawn(prompt) {
+export function askClaudeSpawn(prompt) {
   return new Promise((resolve) => {
     let stdout = '';
     let timedOut = false;
@@ -173,7 +173,7 @@ function askClaudeSpawn(prompt) {
 }
 
 // Per-file summary using spawn — called in parallel via Promise.all
-async function getSummaryFromClaude(extracted) {
+export async function getSummaryFromClaude(extracted) {
   const prompt = `You are indexing a codebase. Given this file structure extract, write:
 1. A single sentence summary of what this file does (max 20 words)
 2. A comma-separated list of 5-8 keywords that developers would use to find this file
@@ -339,6 +339,7 @@ export async function buildIndex(projectPath, options = {}) {
         imports: extracted.imports,
         exports: extracted.exports,
         embedding,   // ← 384-dim vector for semantic search
+        structureSig: [extracted.functions, extracted.imports, extracted.exports].flat().join('|'),  // ← for watcher change detection
         mtime,
         indexed_at: new Date().toISOString(),
       },
