@@ -130,13 +130,56 @@ enhance --config
 
 # Set default project manually
 enhance --set-project /path/to/project
+
+# Start watcher in foreground (manual mode)
+enhance --watch
 ```
 
 ---
 
-## Keeping The Index Fresh
+## Keeping The Index Fresh (Background Watcher)
 
-Re-run `enhance --init` after significant code changes.
+Instead of manually running `enhance --init` after every code change, run the
+watcher as a background daemon using PM2. It watches your project silently and
+re-indexes only when structural changes happen (new functions, imports, exports).
+Cosmetic changes like comments and logs are ignored automatically.
+
+### First Time Setup (run once per machine)
+
+```bash
+# Install PM2 globally
+npm install -g pm2
+
+# Start the watcher daemon
+pm2 start ecosystem.config.cjs
+
+# Save process list and enable auto-start on machine reboot
+pm2 save
+pm2 startup
+# Copy-paste the command it prints and run it
+```
+
+After this, the watcher starts automatically on every machine restart.
+You never run `enhance --init` manually again.
+
+### Daily Commands
+
+```bash
+pm2 status                   # is the watcher running?
+pm2 logs enhancer-watch      # what is it doing?
+pm2 stop enhancer-watch      # stop it
+pm2 restart enhancer-watch   # restart it
+pm2 monit                    # live dashboard
+```
+
+### Switching Projects
+
+```bash
+enhance --set-project /path/to/new-project
+pm2 restart enhancer-watch
+```
+
+The restart is required so the daemon picks up the new project path.
 
 ---
 
@@ -154,23 +197,40 @@ enhance --setup /path/to/project-b
 enhance --init
 ```
 
+### Git Worktree Support
+
+If you use git worktrees (multiple branches checked out simultaneously),
+each worktree gets its own index automatically. The index is named after
+the branch so they never conflict:
+
+```
+your-project/                   → context_index.json          (main)
+your-project-feature-auth/      → context_index_feature-auth.json
+your-project-hotfix/            → context_index_hotfix.json
+```
+
+No extra setup needed. Run `enhance --init` inside each worktree once.
+
 ---
 
 ## File Structure
 
 ```
 prompt-enhancer/
-  index.js          Entry point — CLI routing
-  indexer.js        Scans project, builds context_index.json
-  matcher.js        Two-layer RAG: keyword + semantic search
-  embedder.js       Local embedding model (all-MiniLM-L6-v2)
-  enhancer.js       Claude Code call — generates enhanced prompt
-  setup-project.js  Adds /enhance command to any project
-  system_prompt.txt Enhancement rules — tune this for better output
-  CLAUDE.md         Template for project roots
+  index.js              Entry point — CLI routing
+  indexer.js            Scans project, builds context_index.json
+  matcher.js            Two-layer RAG: keyword + semantic search
+  embedder.js           Local embedding model (all-MiniLM-L6-v2)
+  enhancer.js           Claude Code call — generates enhanced prompt
+  watcher.js            File watcher — auto re-indexes on structural changes
+  setup-project.js      Adds /enhance command to any project
+  ecosystem.config.cjs  PM2 daemon config for background watcher
+  system_prompt.txt     Enhancement rules — tune this for better output
+  CLAUDE.md             Template for project roots
   .claude/
     commands/
-      enhance.md    Claude Code slash command definition
+      enhance.md        Fast slash command — top 3 files, ~15-25s
+      enhance-deep.md   Deep slash command — full stack, ~60-90s
 ```
 
 ---
@@ -200,6 +260,15 @@ Enhanced prompt
 ```
 
 Total time: 5-7 seconds.
+
+---
+
+## Slash Command Modes
+
+| Command | Files Read | Time | Best For |
+|---|---|---|---|
+| `/enhance` | Top 3 files | 15-25s | Most bugs, quick questions |
+| `/enhance-deep` | Full stack | 60-90s | Complex bugs, cross-layer issues |
 
 ---
 
@@ -242,3 +311,21 @@ Check `.claude/commands/enhance.md` exists in the project root.
 
 **Index takes too long**
 Normal on first run. Subsequent runs only re-index changed files.
+
+**PM2 daemon not picking up file changes**
+Check which project it is watching:
+```bash
+enhance --config
+```
+If wrong, update and restart:
+```bash
+enhance --set-project /correct/path
+pm2 restart enhancer-watch
+```
+
+**Watcher firing too often / infinite loop**
+Make sure `context_index*.json` and `.vscode` are in the watcher ignore list
+inside `watcher.js`. Then restart the daemon:
+```bash
+pm2 restart enhancer-watch
+```

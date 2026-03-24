@@ -25,7 +25,8 @@ const WATCH_EXTENSIONS = ['.js', '.jsx', '.ts', '.tsx', '.vue', '.py'];
 
 const SKIP_DIRS = [
   'node_modules', '.git', 'dist', 'build',
-  '.next', 'coverage', '.cache', 'public'
+  '.next', 'coverage', '.cache', 'public',
+  '.vscode', '.idea', '.pm2'
 ];
 
 // Wait 1.5s after last change before re-indexing
@@ -226,7 +227,12 @@ export async function startWatcher() {
   const ignored = [
     ...SKIP_DIRS.map(d => `**/${d}/**`),
     '**/*.log',
-    '**/context_index.json',
+    '**/context_index*.json',
+    '**/.git/**',
+    '**/package-lock.json',
+    '**/yarn.lock',
+    '**/*.tmp',
+    '**/*.temp',
   ];
 
   const watcher = chokidar.watch(projectPath, {
