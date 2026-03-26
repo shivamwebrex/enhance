@@ -1,13 +1,13 @@
 /**
  * config.js
  * ---------
- * Manages persistent config for prompt-enhancer.
- * Stores default project path so team never types it again.
- * 
- * Usage:
- *   enhance --set-project /path/to/project   → saves default project
- *   enhance --set-project                    → shows current config
- *   enhance "raw prompt"                     → uses saved project automatically
+ * Persistent config for Enhance CLI.
+ *
+ * Stores:
+ * - apiKey: RAAG API key (global, one account)
+ * - apiUrl: RAAG API URL
+ * - projectPath: default project to work with
+ * - projects: per-project KB/RAG IDs
  */
 
 import fs from 'fs';
@@ -22,15 +22,16 @@ const CONFIG_PATH = path.join(__dirname, 'config.json');
 // ─────────────────────────────────────────
 
 const DEFAULT_CONFIG = {
-  projectPath: null,       // Default project to index and match against
-  model: 'claude',         // Future: support other models
-  topK: 5,                 // Number of files to retrieve
+  apiKey: null,                              // RAAG API key (raag_xxx)
+  apiUrl: 'https://raag.zoxa.ai/api',         // RAAG API URL
+  projectPath: null,                         // Default project path
+  projects: {},                              // Per-project: { [path]: { kbId, ragId, kbName } }
   createdAt: null,
   updatedAt: null,
 };
 
 // ─────────────────────────────────────────
-// Load config
+// Load / Save
 // ─────────────────────────────────────────
 
 export function loadConfig() {
@@ -45,10 +46,6 @@ export function loadConfig() {
   }
 }
 
-// ─────────────────────────────────────────
-// Save config
-// ─────────────────────────────────────────
-
 export function saveConfig(updates) {
   const current = loadConfig();
   const updated = {
@@ -62,36 +59,74 @@ export function saveConfig(updates) {
 }
 
 // ─────────────────────────────────────────
-// Set default project path
+// API Key
 // ─────────────────────────────────────────
 
-export function setProjectPath(projectPath) {
-  // Resolve to absolute path
-  const absolutePath = path.resolve(projectPath);
+export function getApiKey() {
+  return loadConfig().apiKey || null;
+}
 
-  // Validate it exists
-  if (!fs.existsSync(absolutePath)) {
-    return {
-      success: false,
-      error: `Path does not exist: ${absolutePath}`,
-    };
-  }
-
-  // Save
-  const config = saveConfig({ projectPath: absolutePath });
-
-  return {
-    success: true,
-    projectPath: absolutePath,
-    config,
-  };
+export function setApiKey(apiKey, apiUrl = null) {
+  const updates = { apiKey };
+  if (apiUrl) updates.apiUrl = apiUrl;
+  return saveConfig(updates);
 }
 
 // ─────────────────────────────────────────
-// Get default project path
+// Project Path
 // ─────────────────────────────────────────
 
+export function setProjectPath(projectPath) {
+  const absolutePath = path.resolve(projectPath);
+  if (!fs.existsSync(absolutePath)) {
+    return { success: false, error: `Path does not exist: ${absolutePath}` };
+  }
+  saveConfig({ projectPath: absolutePath });
+  return { success: true, projectPath: absolutePath };
+}
+
 export function getProjectPath() {
+  return loadConfig().projectPath || null;
+}
+
+// ─────────────────────────────────────────
+// Per-Project KB/RAG Config
+// ─────────────────────────────────────────
+
+export function setProjectRaag(projectPath, { kbId, ragId, kbName }) {
   const config = loadConfig();
-  return config.projectPath || null;
+  const projects = config.projects || {};
+  projects[projectPath] = { kbId, ragId, kbName };
+  return saveConfig({ projects });
+}
+
+export function getProjectRaag(projectPath) {
+  // 1. Check config.json first
+  const config = loadConfig();
+  if (config.projects && config.projects[projectPath]) {
+    return config.projects[projectPath];
+  }
+
+  // 2. Fallback: read from .claude/raag.json in project
+  //    (committed with the project, survives fresh clones)
+  try {
+    const raagJson = path.join(projectPath, '.claude', 'raag.json');
+    if (fs.existsSync(raagJson)) {
+      const data = JSON.parse(fs.readFileSync(raagJson, 'utf8'));
+      if (data.kbId && data.ragId) {
+        return { kbId: data.kbId, ragId: data.ragId, kbName: data.kb || '' };
+      }
+    }
+  } catch {
+    // ignore read errors
+  }
+
+  return null;
+}
+
+/**
+ * Check if RAAG is configured (API key exists).
+ */
+export function isConfigured() {
+  return !!loadConfig().apiKey;
 }
