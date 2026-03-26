@@ -11,7 +11,7 @@
  * - Methods for KB creation, RAG build, file sync, and query
  */
 
-import { loadConfig } from './config.js';
+import { loadConfig, getProjectRaag } from './config.js';
 
 const DEFAULT_TIMEOUT_MS = 10000;
 const QUERY_TIMEOUT_MS = 8000;
@@ -236,11 +236,13 @@ export function getRaagClient(projectPath = null) {
     apiKey: config.apiKey,
   };
 
-  // Load per-project KB/RAG IDs
-  if (projectPath && config.projects && config.projects[projectPath]) {
-    const proj = config.projects[projectPath];
-    opts.kbId = proj.kbId;
-    opts.ragId = proj.ragId;
+  // Load per-project KB/RAG IDs from .claude/raag.json
+  if (projectPath) {
+    const proj = getProjectRaag(projectPath);
+    if (proj) {
+      opts.kbId = proj.kbId;
+      opts.ragId = proj.ragId;
+    }
   }
 
   return new RaagClient(opts);
