@@ -20,7 +20,7 @@ import readline from 'readline';
 import { buildIndex } from './indexer.js';
 import { findRelevantFiles } from './matcher.js';
 import { enhancePrompt } from './enhancer.js';
-import { loadConfig, setProjectPath, getProjectPath, getApiKey, setApiKey } from './config.js';
+import { loadConfig, setProjectPath, getApiKey, setApiKey } from './config.js';
 import { startWatcher } from './watcher.js';
 import { createClientWithKey, getRaagClient } from './raag-client.js';
 
@@ -137,7 +137,6 @@ async function ensureApiKey() {
   console.log(chalk.yellow('  No RAAG API key configured.'));
   console.log(chalk.gray('  Get your key at: https://raag.zoxa.ai → API Keys\n'));
 
-  const apiUrl = await askQuestion(chalk.cyan('  RAAG API URL (default: https://raag.zoxa.ai/api):'));
   const key = await askQuestion(chalk.cyan('  RAAG API Key: '));
 
   if (!key) {
@@ -145,23 +144,20 @@ async function ensureApiKey() {
     return false;
   }
 
-  const url = apiUrl || 'https://raag.zoxa.ai/api';
-
   // Validate key
   const spinner = ora({ text: chalk.gray('Validating API key...'), color: 'cyan' }).start();
 
   try {
-    const client = createClientWithKey(url, key);
+    const client = createClientWithKey(key);
     const ok = await client.ping();
 
     if (!ok) {
       spinner.fail(chalk.red('Invalid API key or RAAG server unreachable.'));
-      console.log(chalk.gray('  Check your key at https://raag.zoxa.ai → API Keys'));
-      console.log(chalk.gray(`  Check server is running at ${url}\n`));
+      console.log(chalk.gray('  Check your key at https://raag.zoxa.ai → API Keys\n'));
       return false;
     }
 
-    setApiKey(key, url);
+    setApiKey(key);
     spinner.succeed(chalk.green('Connected to RAAG'));
     console.log('');
     return true;
@@ -184,7 +180,6 @@ function runSetProject(projectPath) {
     console.log(chalk.gray('─'.repeat(40)));
     console.log(chalk.gray('  Project : ') + chalk.white(config.projectPath || 'not set'));
     console.log(chalk.gray('  API Key : ') + chalk.white(config.apiKey ? '✅ configured' : '✗ not set'));
-    console.log(chalk.gray('  API URL : ') + chalk.white(config.apiUrl || 'not set'));
     console.log('');
     return;
   }
@@ -238,19 +233,13 @@ async function runInit(args) {
 async function runEnhance(rawPrompt, { searchOnly = false } = {}) {
   printBanner();
 
-  // Auto-detect project: check CWD for .claude/raag.json, then fall back to saved config
-  let projectPath = null;
+  // Project must be initialized — check CWD for .claude/raag.json
   const cwdRaagJson = path.join(process.cwd(), '.claude', 'raag.json');
-  if (fs.existsSync(cwdRaagJson)) {
-    projectPath = process.cwd();
-  } else {
-    projectPath = getProjectPath();
-  }
-
-  if (!projectPath) {
+  if (!fs.existsSync(cwdRaagJson)) {
     printError('No project found. Run `enhance --init` in your project directory first.');
     process.exit(1);
   }
+  const projectPath = process.cwd();
 
   // Step 1: Find relevant files via RAAG
   const spinner = ora({
@@ -319,7 +308,6 @@ async function runStatus() {
   console.log(chalk.bold('  Enhance Status'));
   console.log(chalk.gray('─'.repeat(40)));
   console.log(chalk.gray('  API Key   : ') + chalk.white(config.apiKey ? '✅ configured' : '✗ not set'));
-  console.log(chalk.gray('  API URL   : ') + chalk.white(config.apiUrl || 'not set'));
   console.log(chalk.gray('  Project   : ') + chalk.white(config.projectPath || 'not set'));
 
   if (config.projectPath && config.projects?.[config.projectPath]) {

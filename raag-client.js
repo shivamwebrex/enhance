@@ -24,10 +24,10 @@ const RETRY_BACKOFFS = [1000, 2000];
 
 class RaagClient {
   /**
-   * @param {{ apiUrl: string, apiKey: string, kbId?: string, ragId?: string }} opts
+   * @param {{ apiKey: string, kbId?: string, ragId?: string }} opts
    */
-  constructor({ apiUrl, apiKey, kbId = null, ragId = null }) {
-    this.apiUrl = apiUrl.replace(/\/$/, '');
+  constructor({ apiKey, kbId = null, ragId = null }) {
+    this.apiUrl = 'https://raag.zoxa.ai/api';
     this.apiKey = apiKey;
     this.kbId = kbId;
     this.ragId = ragId;
@@ -187,7 +187,7 @@ class RaagClient {
    * Poll until RAG model build is ready.
    * @param {string} [ragId] - Override ragId
    * @param {number} [pollMs=2000]
-   * @param {number} [timeoutMs=300000] - 5 minute timeout
+   * @param {number} [timeoutMs=900000] - 15 minute timeout
    */
   async waitForReady(ragId = null, pollMs = 2000, timeoutMs = 300000) {
     const id = ragId || this.ragId;
@@ -233,7 +233,6 @@ export function getRaagClient(projectPath = null) {
   if (!config.apiKey) return null;
 
   const opts = {
-    apiUrl: config.apiUrl || 'https://raag.zoxa.ai/api',
     apiKey: config.apiKey,
   };
 
@@ -250,8 +249,8 @@ export function getRaagClient(projectPath = null) {
 /**
  * Create a RaagClient with just an API key (for initial setup/validation).
  */
-export function createClientWithKey(apiUrl, apiKey) {
-  return new RaagClient({ apiUrl, apiKey });
+export function createClientWithKey(apiKey) {
+  return new RaagClient({ apiKey });
 }
 
 export { RaagClient };

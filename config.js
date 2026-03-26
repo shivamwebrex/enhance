@@ -5,9 +5,7 @@
  *
  * Stores:
  * - apiKey: RAAG API key (global, one account)
- * - apiUrl: RAAG API URL
  * - projectPath: default project to work with
- * - projects: per-project KB/RAG IDs
  */
 
 import fs from 'fs';
@@ -23,9 +21,7 @@ const CONFIG_PATH = path.join(__dirname, 'config.json');
 
 const DEFAULT_CONFIG = {
   apiKey: null,                              // RAAG API key (raag_xxx)
-  apiUrl: 'https://raag.zoxa.ai/api',         // RAAG API URL
   projectPath: null,                         // Default project path
-  projects: {},                              // Per-project: { [path]: { kbId, ragId, kbName } }
   createdAt: null,
   updatedAt: null,
 };
@@ -66,10 +62,8 @@ export function getApiKey() {
   return loadConfig().apiKey || null;
 }
 
-export function setApiKey(apiKey, apiUrl = null) {
-  const updates = { apiKey };
-  if (apiUrl) updates.apiUrl = apiUrl;
-  return saveConfig(updates);
+export function setApiKey(apiKey) {
+  return saveConfig({ apiKey });
 }
 
 // ─────────────────────────────────────────
@@ -90,25 +84,10 @@ export function getProjectPath() {
 }
 
 // ─────────────────────────────────────────
-// Per-Project KB/RAG Config
+// Per-Project KB/RAG Config (reads from .claude/raag.json)
 // ─────────────────────────────────────────
 
-export function setProjectRaag(projectPath, { kbId, ragId, kbName }) {
-  const config = loadConfig();
-  const projects = config.projects || {};
-  projects[projectPath] = { kbId, ragId, kbName };
-  return saveConfig({ projects });
-}
-
 export function getProjectRaag(projectPath) {
-  // 1. Check config.json first
-  const config = loadConfig();
-  if (config.projects && config.projects[projectPath]) {
-    return config.projects[projectPath];
-  }
-
-  // 2. Fallback: read from .claude/raag.json in project
-  //    (committed with the project, survives fresh clones)
   try {
     const raagJson = path.join(projectPath, '.claude', 'raag.json');
     if (fs.existsSync(raagJson)) {
@@ -120,7 +99,6 @@ export function getProjectRaag(projectPath) {
   } catch {
     // ignore read errors
   }
-
   return null;
 }
 

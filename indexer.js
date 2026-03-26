@@ -18,13 +18,13 @@ import { spawn } from 'child_process';
 import { glob } from 'glob';
 import chalk from 'chalk';
 import { getRaagClient } from './raag-client.js';
-import { getProjectRaag, setProjectRaag } from './config.js';
+import { getProjectRaag } from './config.js';
 
 // ─────────────────────────────────────────
 // Config
 // ─────────────────────────────────────────
 
-const FILE_EXTENSIONS = ['js', 'jsx', 'ts', 'tsx', 'vue', 'py', 'go', 'rs', 'java', 'rb'];
+const FILE_EXTENSIONS = ['js', 'jsx', 'ts', 'tsx', 'vue', 'py', 'go', 'rs', 'java', 'rb','html','css','cpp'];
 
 const SKIP_DIRS = [
   'node_modules', '.git', 'dist', 'build',
@@ -291,7 +291,6 @@ async function buildRAGAfterUpload(projectPath, raag, projConfig) {
 
   // Now save full config with ragId
   const fullConfig = { kbId: raag.kbId, ragId: rag.id, kbName: projectName };
-  setProjectRaag(projectPath, fullConfig);
   writeProjectFiles(projectPath, fullConfig);
 
   return fullConfig;
