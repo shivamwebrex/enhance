@@ -12,7 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import chalk from 'chalk';
 import { getProjectPath, getProjectRaag } from './config.js';
-import { extractFileStructure, getSummaryFromClaude } from './indexer.js';
+import { extractFileStructure, getSummaryFromClaude, prependSummary } from './indexer.js';
 import { getRaagClient } from './raag-client.js';
 
 // ─────────────────────────────────────────
@@ -148,7 +148,7 @@ async function reindexFile(filePath, projectPath, eventType) {
     const extracted = extractFileStructure(relativePath, content);
 
     // Get summary from Claude
-    const { summary } = await getSummaryFromClaude(extracted);
+    const { summary, keywords } = await getSummaryFromClaude(extracted, content);
 
     // Update local cache
     const cache = loadCache(projectPath);
@@ -156,14 +156,15 @@ async function reindexFile(filePath, projectPath, eventType) {
       mtime: stats.mtimeMs,
       structureSig: [...extracted.functions, ...extracted.imports, ...extracted.exports].join('|'),
       summary,
+      keywords,
     };
     saveCache(projectPath, cache);
 
     console.log(chalk.green(`  ✅ Re-indexed: ${relativePath}`));
 
-    // Sync to RAAG with summary prepended
+    // Sync to RAAG with summary + commented code
     if (raag) {
-      const contentWithSummary = `<!-- RAAG-SUMMARY: ${summary} | File: ${relativePath} -->\n${content}`;
+      const contentWithSummary = prependSummary(content, summary, keywords, relativePath);
       try {
         await raag.syncFiles([{ path: relativePath, content: contentWithSummary }]);
         console.log(chalk.gray(`  🔄 Synced to RAAG`));

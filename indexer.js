@@ -47,6 +47,8 @@ export function extractFileStructure(filePath, content) {
   const extracted = {
     path: filePath,
     functions: [],
+    functionSignatures: [],
+    classNames: [],
     imports: [],
     exports: [],
     comments: [],
@@ -63,13 +65,25 @@ export function extractFileStructure(filePath, content) {
       trimmed.match(/^(export\s+)?const\s+\w+\s*=\s*(async\s+)?function/)
     ) {
       const match = trimmed.match(/(?:function|const)\s+(\w+)/);
-      if (match) extracted.functions.push(match[1]);
+      if (match) {
+        extracted.functions.push(match[1]);
+        extracted.functionSignatures.push(trimmed.slice(0, 120));
+      }
     }
 
     // Arrow function methods
     if (trimmed.match(/^\w+\s*[=:]\s*(async\s+)?\(.*\)\s*=>/)) {
       const match = trimmed.match(/^(\w+)\s*[=:]/);
-      if (match) extracted.functions.push(match[1]);
+      if (match) {
+        extracted.functions.push(match[1]);
+        extracted.functionSignatures.push(trimmed.slice(0, 120));
+      }
+    }
+
+    // Class declarations
+    if (trimmed.match(/^(export\s+)?(default\s+)?class\s+\w+/)) {
+      const match = trimmed.match(/class\s+(\w+)/);
+      if (match) extracted.classNames.push(match[1]);
     }
 
     // Import statements
@@ -100,11 +114,13 @@ export function extractFileStructure(filePath, content) {
   }
 
   // Deduplicate
-  extracted.functions = [...new Set(extracted.functions)].slice(0, 15);
-  extracted.imports = [...new Set(extracted.imports)].slice(0, 10);
-  extracted.exports = [...new Set(extracted.exports)].slice(0, 10);
-  extracted.comments = [...new Set(extracted.comments)].slice(0, 5);
-  extracted.variables = [...new Set(extracted.variables)].slice(0, 10);
+  extracted.functions = [...new Set(extracted.functions)].slice(0, 50);
+  extracted.functionSignatures = [...new Set(extracted.functionSignatures)].slice(0, 50);
+  extracted.classNames = [...new Set(extracted.classNames)].slice(0, 20);
+  extracted.imports = [...new Set(extracted.imports)].slice(0, 30);
+  extracted.exports = [...new Set(extracted.exports)].slice(0, 30);
+  extracted.comments = [...new Set(extracted.comments)].slice(0, 20);
+  extracted.variables = [...new Set(extracted.variables)].slice(0, 30);
 
   return extracted;
 }
@@ -114,11 +130,34 @@ export function extractFileStructure(filePath, content) {
 // ─────────────────────────────────────────
 
 export function buildFallbackSummary(extracted) {
+  const parts = [];
+  parts.push(`This file is located at ${extracted.path}.`);
+
+  if (extracted.classNames?.length > 0) {
+    parts.push(`\nClasses: ${extracted.classNames.join(', ')}.`);
+  }
+  if (extracted.functions.length > 0) {
+    parts.push(`\nFunctions defined: ${extracted.functions.join(', ')}.`);
+  }
+  if (extracted.functionSignatures?.length > 0) {
+    parts.push(`\nFunction signatures:\n${extracted.functionSignatures.join('\n')}`);
+  }
+  if (extracted.imports.length > 0) {
+    parts.push(`\nImports from: ${extracted.imports.join(', ')}.`);
+  }
+  if (extracted.exports.length > 0) {
+    parts.push(`\nExports: ${extracted.exports.join(', ')}.`);
+  }
+  if (extracted.variables.length > 0) {
+    parts.push(`\nKey variables: ${extracted.variables.join(', ')}.`);
+  }
+
   return {
-    summary: `File with functions: ${extracted.functions.slice(0, 3).join(', ') || 'unknown'}`,
+    summary: parts.join('\n'),
     keywords: [
-      ...extracted.functions.slice(0, 3),
-      ...extracted.exports.slice(0, 2),
+      ...extracted.functions.slice(0, 5),
+      ...extracted.exports.slice(0, 3),
+      ...(extracted.classNames || []).slice(0, 2),
     ].map(k => k.toLowerCase()).filter(Boolean),
   };
 }
@@ -137,7 +176,7 @@ export function askClaudeSpawn(prompt) {
       timedOut = true;
       try { child.kill(); } catch {}
       resolve(null);
-    }, 35000);
+    }, 90000);
 
     child.stdin.write(prompt, 'utf8');
     child.stdin.end();
@@ -157,27 +196,52 @@ export function askClaudeSpawn(prompt) {
   });
 }
 
-export async function getSummaryFromClaude(extracted) {
-  const prompt = `You are indexing a codebase. Given this file structure extract, write:
-1. A summary of what this file does (max 50 words)
-2. A comma-separated list of 5-8 keywords that developers would use to find this file
+export async function getSummaryFromClaude(extracted, content) {
+  const prompt = `You are generating a detailed documentation summary for a source code file. A developer should be able to understand this file completely from your summary alone.
 
 File: ${extracted.path}
-Functions: ${extracted.functions.join(', ') || 'none'}
+
+=== EXTRACTED STRUCTURE ===
+Function signatures:
+${extracted.functionSignatures?.join('\n') || 'none'}
+Classes: ${extracted.classNames?.join(', ') || 'none'}
 Imports: ${extracted.imports.join(', ') || 'none'}
 Exports: ${extracted.exports.join(', ') || 'none'}
 Key variables: ${extracted.variables.join(', ') || 'none'}
 Comments: ${extracted.comments.join(' | ') || 'none'}
 
-Respond in this exact format (no other text):
-SUMMARY: <summary in max 50 words>
+=== SOURCE CODE ===
+${content}
+
+Write a comprehensive summary covering ALL of the following:
+
+1. PURPOSE: What this file does and its role in the project (1-2 sentences)
+2. KEY VARIABLES & CONSTANTS: List each important variable/constant, its type/value, and what it controls
+3. FUNCTIONS: For each function, describe what it does, its parameters, return value, and key logic
+4. CALL GRAPH: Which functions call which other functions within this file
+5. EXTERNAL DEPENDENCIES: What is imported and how it's used
+6. EXPORTS: What this file exposes to other modules
+7. KEY PATTERNS: Design patterns, error handling, async patterns used
+8. DATA FLOW: How data moves through the file from input to output
+
+Be thorough. No word limit. Write as much detail as needed for a developer to fully understand this file.
+
+Respond in this exact format:
+SUMMARY_START
+<your detailed summary here>
+SUMMARY_END
 KEYWORDS: <keyword1, keyword2, keyword3, ...>`;
 
   const output = await askClaudeSpawn(prompt);
 
   if (!output) return buildFallbackSummary(extracted);
 
-  const summaryMatch = output.match(/SUMMARY:\s*(.+)/);
+  // Multi-line summary parsing
+  let summaryMatch = output.match(/SUMMARY_START\s*\n([\s\S]*?)\nSUMMARY_END/);
+  // Fallback: if SUMMARY_END missing (truncated), take everything after SUMMARY_START
+  if (!summaryMatch) {
+    summaryMatch = output.match(/SUMMARY_START\s*\n([\s\S]*)/);
+  }
   const keywordsMatch = output.match(/KEYWORDS:\s*(.+)/);
 
   if (summaryMatch && summaryMatch[1].trim()) {
@@ -193,12 +257,29 @@ KEYWORDS: <keyword1, keyword2, keyword3, ...>`;
 }
 
 // ─────────────────────────────────────────
-// Summary prepend — adds context for RAAG
+// Format content for RAAG KB
 // ─────────────────────────────────────────
 
-function prependSummary(content, summary, filePath) {
-  const block = `<!-- RAAG-SUMMARY: ${summary} | File: ${filePath} -->\n`;
-  return block + content;
+function getCommentPrefix(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (['.py', '.rb'].includes(ext)) return '# ';
+  return '// ';
+}
+
+export function prependSummary(content, summary, keywords, filePath) {
+  const prefix = getCommentPrefix(filePath);
+  const commentedCode = content.split('\n').map(line => prefix + line).join('\n');
+
+  return [
+    `=== FILE: ${filePath} ===`,
+    '',
+    summary,
+    '',
+    `=== KEYWORDS: ${keywords.join(', ')} ===`,
+    '',
+    `=== SOURCE CODE (reference) ===`,
+    commentedCode,
+  ].join('\n');
 }
 
 // ─────────────────────────────────────────
@@ -428,8 +509,9 @@ export async function buildIndex(projectPath, options = {}) {
         const content = fs.readFileSync(filePath, 'utf8');
         if (content.trim().length < 50) continue;
         const cachedSummary = cache[relativePath]?.summary || '';
+        const cachedKeywords = cache[relativePath]?.keywords || [];
         const withSummary = cachedSummary
-          ? prependSummary(content, cachedSummary, relativePath)
+          ? prependSummary(content, cachedSummary, cachedKeywords, relativePath)
           : content;
         filesToSync.push({ path: relativePath, content: withSummary });
       } catch { /* skip unreadable */ }
@@ -467,16 +549,17 @@ export async function buildIndex(projectPath, options = {}) {
     const results = await Promise.all(
       batch.map(async ({ relativePath, content, mtime }) => {
         const extracted = extractFileStructure(relativePath, content);
-        const { summary } = await getSummaryFromClaude(extracted);
+        const { summary, keywords } = await getSummaryFromClaude(extracted, content);
 
-        const contentWithSummary = prependSummary(content, summary, relativePath);
+        const contentWithSummary = prependSummary(content, summary, keywords, relativePath);
         const structureSig = [extracted.functions, extracted.imports, extracted.exports].flat().join('|');
 
         return {
           relativePath,
           summary,
+          keywords,
           contentWithSummary,
-          cache: { mtime, structureSig, summary },
+          cache: { mtime, structureSig, summary, keywords },
         };
       })
     );
@@ -500,8 +583,9 @@ export async function buildIndex(projectPath, options = {}) {
       if (content.trim().length < 50) continue;
 
       const cachedSummary = cache[relativePath]?.summary || '';
+      const cachedKeywords = cache[relativePath]?.keywords || [];
       const withSummary = cachedSummary
-        ? prependSummary(content, cachedSummary, relativePath)
+        ? prependSummary(content, cachedSummary, cachedKeywords, relativePath)
         : content;
 
       filesToSync.push({ path: relativePath, content: withSummary });
