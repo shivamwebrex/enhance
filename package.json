@@ -5,7 +5,8 @@
   "main": "index.js",
   "type": "module",
   "bin": {
-    "enhance": "./index.js"
+    "enhance": "./index.js",
+    "eh": "./index.js"
   },
   "scripts": {
     "start": "node index.js"

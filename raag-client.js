@@ -173,7 +173,7 @@ class RaagClient {
   }
 
   /**
-   * Trigger incremental rebuild after file sync.
+   * Trigger incremental rebuild after file sync
    */
   async triggerRebuild(sources = null) {
     if (!this.ragId) throw new Error('ragId not set');

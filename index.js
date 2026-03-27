@@ -98,10 +98,10 @@ function printHelp() {
   console.log(chalk.cyan('  enhance --init [/path/to/project]'));
   console.log(chalk.gray('    → Index project: scan files, upload to RAAG, build search'));
   console.log('');
-  console.log(chalk.cyan('  enhance "your raw prompt"'));
+  console.log(chalk.cyan('  enhance your raw prompt'));
   console.log(chalk.gray('    → Enhance a prompt using RAAG semantic search + Claude'));
   console.log('');
-  console.log(chalk.cyan('  enhance -s "your query"'));
+  console.log(chalk.cyan('  enhance -s your query'));
   console.log(chalk.gray('    → Search only — return RAAG results instantly (no Claude)'));
   console.log('');
   console.log(chalk.cyan('  enhance --watch'));
