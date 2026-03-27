@@ -21,7 +21,6 @@ import { buildIndex } from './indexer.js';
 import { findRelevantFiles } from './matcher.js';
 import { enhancePrompt } from './enhancer.js';
 import { loadConfig, setProjectPath, getApiKey, setApiKey } from './config.js';
-import { startWatcher } from './watcher.js';
 import { createClientWithKey, getRaagClient } from './raag-client.js';
 
 // ─────────────────────────────────────────
@@ -366,10 +365,6 @@ async function main() {
     process.exit(0);
   }
 
-  if (args[0] === '--watch') {
-    await startWatcher();
-    return;
-  }
 
   // Default: enhance prompt
   const searchOnly = args.includes('-s');

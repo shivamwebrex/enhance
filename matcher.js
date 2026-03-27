@@ -3,15 +3,20 @@
  * ----------
  * Finds relevant files for a prompt using RAAG semantic search.
  *
- * Single call to RAAG query endpoint — no local search, no fallback.
- * Returns top 5 file chunks formatted as context for the enhancer.
+ * Before querying, runs a lazy git-based sync to ensure the index
+ * reflects any uncommitted working-tree changes. No watcher needed.
+ *
+ * Flow:
+ *   lazySyncIfNeeded()  → sync only changed files (git status)
+ *   raag.queryFiles()   → semantic search over fresh index
  */
 
 import chalk from 'chalk';
 import { getRaagClient } from './raag-client.js';
 import { getProjectRaag } from './config.js';
+import { lazySyncIfNeeded } from './sync.js';
 
-const TOP_K = 5;
+const TOP_K = parseInt(process.env.TOP_K_FINAL ?? '5', 10);
 
 // ─────────────────────────────────────────
 // Format RAAG results into context block
@@ -38,10 +43,11 @@ ${content}`;
 // ─────────────────────────────────────────
 
 /**
- * Query RAAG for files relevant to the prompt.
- * @param {string} rawPrompt - Developer's raw prompt
- * @param {string} projectPath - Project path (to find KB/RAG IDs)
- * @returns {{ files: object[], context: string, matchedCount: number, topScore: string, error?: string }}
+ * Syncs git changes then queries RAAG for files relevant to the prompt.
+ *
+ * @param {string} rawPrompt   - Developer's raw prompt
+ * @param {string} projectPath - Project root (to find KB/RAG IDs + cache)
+ * @returns {{ files: object[], context: string, matchedCount: number, topScore: string, latencyMs: number, error?: string }}
  */
 export async function findRelevantFiles(rawPrompt, projectPath) {
   if (!projectPath) {
@@ -59,7 +65,7 @@ export async function findRelevantFiles(rawPrompt, projectPath) {
     };
   }
 
-  // Get RAAG client with project IDs
+  // Get RAAG client
   const raag = getRaagClient(projectPath);
   if (!raag) {
     return {
@@ -70,13 +76,18 @@ export async function findRelevantFiles(rawPrompt, projectPath) {
     };
   }
 
-  // Query RAAG
+  // ── Lazy sync: push any git-modified files to RAAG before querying ──
+  // Silent on no changes. Prints a one-liner if files are synced.
+  await lazySyncIfNeeded(projectPath, { verbose: true });
+
+  // ── RAAG query ──
   let raagResult;
   const queryStart = performance.now();
+
   try {
     raagResult = await raag.queryFiles(rawPrompt, TOP_K);
   } catch (err) {
-    console.error(chalk.red(`  ✗ RAAG query failed: ${err.message}`));
+    console.error(chalk.red(`  RAAG query failed: ${err.message}`));
     return {
       files: [],
       context: '',
@@ -86,11 +97,8 @@ export async function findRelevantFiles(rawPrompt, projectPath) {
   }
 
   const results = raagResult.results || [];
-
-  // Format context for enhancer
   const context = formatContext(results);
 
-  // Extract top score for display
   const topScore = results.length > 0 && results[0].score != null
     ? `${(results[0].score * 100).toFixed(0)}%`
     : 'N/A';
