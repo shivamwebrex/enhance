@@ -104,9 +104,6 @@ function printHelp() {
   console.log(chalk.cyan('  enhance -s your query'));
   console.log(chalk.gray('    → Search only — return RAAG results instantly (no Claude)'));
   console.log('');
-  console.log(chalk.cyan('  enhance --watch'));
-  console.log(chalk.gray('    → Watch project for changes, auto-sync to RAAG'));
-  console.log('');
   console.log(chalk.cyan('  enhance --status'));
   console.log(chalk.gray('    → Show RAAG connection and project info'));
   console.log('');

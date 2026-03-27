@@ -5,11 +5,15 @@
  *
  * For each file:
  *   1. Extract structure (functions, imports, exports) — no Claude
- *   2. Claude writes a ≤50 word summary from the extract
+ *   2. Claude writes a detailed summary from the extract
  *   3. Prepend summary to file content and upload to RAAG KB
  *
  * Auto-creates KB + RAG model in RAAG on first init.
  * No local index file — RAAG is the single source of truth.
+ *
+ * Uses --no-session-persistence on every Claude spawn so summaries
+ * never appear in local Claude history. Zero clutter, zero session
+ * management, full parallel processing.
  */
 
 import fs from 'fs';
@@ -24,7 +28,7 @@ import { getProjectRaag } from './config.js';
 // Config
 // ─────────────────────────────────────────
 
-const FILE_EXTENSIONS = ['js', 'jsx', 'ts', 'tsx', 'vue', 'py', 'go', 'rs', 'java', 'rb','html','css','cpp'];
+const FILE_EXTENSIONS = ['js', 'jsx', 'ts', 'tsx', 'vue', 'py', 'go', 'rs', 'java', 'rb', 'html', 'css', 'cpp'];
 
 const SKIP_DIRS = [
   'node_modules', '.git', 'dist', 'build',
@@ -34,8 +38,6 @@ const SKIP_DIRS = [
 
 const MAX_FILE_SIZE_KB = 100;
 const PARALLEL_LIMIT = 10;
-
-// Local cache for watcher change detection only
 const CACHE_FILENAME = '.enhance-cache.json';
 
 // ─────────────────────────────────────────
@@ -58,7 +60,6 @@ export function extractFileStructure(filePath, content) {
   for (const line of lines) {
     const trimmed = line.trim();
 
-    // Function declarations
     if (
       trimmed.match(/^(export\s+)?(async\s+)?function\s+\w+/) ||
       trimmed.match(/^(export\s+)?const\s+\w+\s*=\s*(async\s+)?\(/) ||
@@ -71,7 +72,6 @@ export function extractFileStructure(filePath, content) {
       }
     }
 
-    // Arrow function methods
     if (trimmed.match(/^\w+\s*[=:]\s*(async\s+)?\(.*\)\s*=>/)) {
       const match = trimmed.match(/^(\w+)\s*[=:]/);
       if (match) {
@@ -80,25 +80,21 @@ export function extractFileStructure(filePath, content) {
       }
     }
 
-    // Class declarations
     if (trimmed.match(/^(export\s+)?(default\s+)?class\s+\w+/)) {
       const match = trimmed.match(/class\s+(\w+)/);
       if (match) extracted.classNames.push(match[1]);
     }
 
-    // Import statements
     if (trimmed.startsWith('import ')) {
       const match = trimmed.match(/from\s+['"](.+)['"]/);
       if (match) extracted.imports.push(match[1]);
     }
 
-    // Export statements
     if (trimmed.startsWith('export ')) {
       const match = trimmed.match(/export\s+(?:default\s+)?(?:class|function|const|let|var)\s+(\w+)/);
       if (match) extracted.exports.push(match[1]);
     }
 
-    // JSDoc and meaningful comments
     if (trimmed.startsWith('//') || trimmed.startsWith('*')) {
       const comment = trimmed.replace(/^[/*\s]+/, '').trim();
       if (comment.length > 10 && comment.length < 100) {
@@ -106,14 +102,12 @@ export function extractFileStructure(filePath, content) {
       }
     }
 
-    // State/store variables
     if (trimmed.match(/^(const|let)\s+\w+\s*=\s*(create|createSlice|useState|useReducer|atom)/)) {
       const match = trimmed.match(/^(?:const|let)\s+(\w+)/);
       if (match) extracted.variables.push(match[1]);
     }
   }
 
-  // Deduplicate
   extracted.functions = [...new Set(extracted.functions)].slice(0, 50);
   extracted.functionSignatures = [...new Set(extracted.functionSignatures)].slice(0, 50);
   extracted.classNames = [...new Set(extracted.classNames)].slice(0, 20);
@@ -126,7 +120,50 @@ export function extractFileStructure(filePath, content) {
 }
 
 // ─────────────────────────────────────────
-// Step 2: Ask Claude for semantic summary
+// Step 2: Claude spawn — no history, no session
+// ─────────────────────────────────────────
+
+/**
+ * Spawns Claude in print mode with --no-session-persistence.
+ * Response is returned as plain text. Nothing is saved to disk.
+ * Zero history entries regardless of how many files are indexed.
+ */
+export function askClaudeSpawn(prompt) {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let timedOut = false;
+
+    const child = spawn('claude', ['-p', '--no-session-persistence', '-'], {
+      shell: true,
+      windowsHide: true,
+    });
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill(); } catch {}
+      resolve(null);
+    }, 90000);
+
+    child.stdin.write(prompt, 'utf8');
+    child.stdin.end();
+
+    child.stdout.on('data', (data) => { stdout += data.toString(); });
+
+    child.on('close', () => {
+      clearTimeout(timer);
+      if (timedOut) return;
+      resolve(stdout.trim() || null);
+    });
+
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve(null);
+    });
+  });
+}
+
+// ─────────────────────────────────────────
+// Step 3: Generate summary via Claude
 // ─────────────────────────────────────────
 
 export function buildFallbackSummary(extracted) {
@@ -160,40 +197,6 @@ export function buildFallbackSummary(extracted) {
       ...(extracted.classNames || []).slice(0, 2),
     ].map(k => k.toLowerCase()).filter(Boolean),
   };
-}
-
-export function askClaudeSpawn(prompt) {
-  return new Promise((resolve) => {
-    let stdout = '';
-    let timedOut = false;
-
-    const child = spawn('claude', ['-p', '-'], {
-      shell: true,
-      windowsHide: true,
-    });
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try { child.kill(); } catch {}
-      resolve(null);
-    }, 90000);
-
-    child.stdin.write(prompt, 'utf8');
-    child.stdin.end();
-
-    child.stdout.on('data', (data) => { stdout += data.toString(); });
-
-    child.on('close', () => {
-      clearTimeout(timer);
-      if (timedOut) return;
-      resolve(stdout.trim() || null);
-    });
-
-    child.on('error', () => {
-      clearTimeout(timer);
-      resolve(null);
-    });
-  });
 }
 
 export async function getSummaryFromClaude(extracted, content) {
@@ -236,9 +239,7 @@ KEYWORDS: <keyword1, keyword2, keyword3, ...>`;
 
   if (!output) return buildFallbackSummary(extracted);
 
-  // Multi-line summary parsing
   let summaryMatch = output.match(/SUMMARY_START\s*\n([\s\S]*?)\nSUMMARY_END/);
-  // Fallback: if SUMMARY_END missing (truncated), take everything after SUMMARY_START
   if (!summaryMatch) {
     summaryMatch = output.match(/SUMMARY_START\s*\n([\s\S]*)/);
   }
@@ -283,7 +284,7 @@ export function prependSummary(content, summary, keywords, filePath) {
 }
 
 // ─────────────────────────────────────────
-// Local cache (for watcher change detection)
+// Cache helpers
 // ─────────────────────────────────────────
 
 function getCachePath(projectPath) {
@@ -308,27 +309,19 @@ function saveCache(projectPath, cache) {
 // RAAG: Auto-create KB + RAG
 // ─────────────────────────────────────────
 
-/**
- * Ensure KB exists. Returns { kbId, ragId?, kbName, needsFullBuild }.
- * Does NOT build RAG here — that happens AFTER files are uploaded.
- */
 async function ensureKBAndRAG(projectPath, raag) {
   let projConfig = getProjectRaag(projectPath);
   const projectName = path.basename(projectPath);
 
-  // Check if existing config is valid
   if (projConfig && projConfig.kbId && projConfig.ragId) {
     raag.kbId = projConfig.kbId;
     raag.ragId = projConfig.ragId;
 
-    // Verify RAG still exists in RAAG
     try {
       const status = await raag.getRAGStatus(projConfig.ragId);
-      // RAG exists and has chunks — incremental mode
       if (status.status === 'ready' && status.total_chunks > 0) {
         return { ...projConfig, needsFullBuild: false };
       }
-      // RAG exists but empty (0 chunks) — needs full rebuild
       console.log(chalk.yellow(`\n  ⚠  RAG model has 0 chunks. Will rebuild after upload.`));
       return { ...projConfig, needsFullBuild: true };
     } catch (err) {
@@ -336,28 +329,21 @@ async function ensureKBAndRAG(projectPath, raag) {
         console.log(chalk.yellow(`\n  ⚠  RAG model no longer exists in RAAG. Re-creating...`));
         const cachePath = path.join(projectPath, CACHE_FILENAME);
         if (fs.existsSync(cachePath)) fs.unlinkSync(cachePath);
-        // Fall through to create fresh
       } else {
         throw err;
       }
     }
   }
 
-  // Create KB (or get existing)
   console.log(chalk.gray(`\n  Creating KB "${projectName}" in RAAG...`));
   const kb = await raag.createKB(projectName, `Codebase index for ${projectName}`);
   raag.kbId = kb.id;
   console.log(chalk.green(`  ✅ KB created: ${kb.name} (${kb.id})`));
 
-  // DON'T build RAG yet — files need to be uploaded first
-  // Save partial config (no ragId yet)
   projConfig = { kbId: kb.id, ragId: null, kbName: projectName, needsFullBuild: true };
   return projConfig;
 }
 
-/**
- * Build RAG model AFTER files have been uploaded to KB.
- */
 async function buildRAGAfterUpload(projectPath, raag, projConfig) {
   const projectName = projConfig.kbName || path.basename(projectPath);
 
@@ -370,7 +356,6 @@ async function buildRAGAfterUpload(projectPath, raag, projConfig) {
   await raag.waitForReady(rag.id);
   console.log(chalk.green(`  ✅ RAG model ready`));
 
-  // Now save full config with ragId
   const fullConfig = { kbId: raag.kbId, ragId: rag.id, kbName: projectName };
   writeProjectFiles(projectPath, fullConfig);
 
@@ -382,7 +367,6 @@ async function buildRAGAfterUpload(projectPath, raag, projConfig) {
 // ─────────────────────────────────────────
 
 function writeProjectFiles(projectPath, projConfig) {
-  // 1. Write .claude/raag.json — stores KB/RAG IDs (committed with project)
   const claudeDir = path.join(projectPath, '.claude');
   fs.mkdirSync(claudeDir, { recursive: true });
 
@@ -392,7 +376,6 @@ function writeProjectFiles(projectPath, projConfig) {
     ragId: projConfig.ragId,
   }, null, 2) + '\n');
 
-  // 2. Write .claude/commands/enhance.md — slash command for Claude Code
   const commandsDir = path.join(claudeDir, 'commands');
   fs.mkdirSync(commandsDir, { recursive: true });
 
@@ -425,21 +408,16 @@ export async function buildIndex(projectPath, options = {}) {
     process.exit(1);
   }
 
-  // Get RAAG client
   const raag = getRaagClient(projectPath);
   if (!raag) {
     console.error(chalk.red('  RAAG not configured. Run any enhance command to set up API key.'));
     process.exit(1);
   }
 
-  // Ensure KB exists (may or may not have RAG yet)
   const kbConfig = await ensureKBAndRAG(projectPath, raag);
   const needsFullBuild = kbConfig.needsFullBuild || !kbConfig.ragId;
-
-  // Force re-index if RAG needs full build
   const cache = (force || needsFullBuild) ? {} : loadCache(projectPath);
 
-  // Find files
   const pattern = `**/*.{${FILE_EXTENSIONS.join(',')}}`;
   const ignore = SKIP_DIRS.map(d => `**/${d}/**`);
 
@@ -451,7 +429,6 @@ export async function buildIndex(projectPath, options = {}) {
 
   console.log(`  Found ${files.length} files in ${projectPath}\n`);
 
-  // Pre-filter: separate unchanged from files needing indexing
   const toIndex = [];
   let skipped = 0;
   let unchanged = 0;
@@ -474,7 +451,6 @@ export async function buildIndex(projectPath, options = {}) {
 
     const mtime = stats.mtimeMs;
 
-    // Skip unchanged files
     if (cache[relativePath] && cache[relativePath].mtime === mtime) {
       unchanged++;
       continue;
@@ -499,7 +475,6 @@ export async function buildIndex(projectPath, options = {}) {
   console.log(`  ${toIndex.length} need indexing | ${unchanged} unchanged | ${skipped} skipped\n`);
 
   if (toIndex.length === 0 && unchanged > 0) {
-    // Still sync to RAAG so deleted files get removed
     console.log(chalk.gray('  No new files to index. Syncing to RAAG for deletion detection...\n'));
 
     const filesToSync = [];
@@ -534,7 +509,8 @@ export async function buildIndex(projectPath, options = {}) {
     return;
   }
 
-  // Process files in parallel batches (Claude summaries)
+  // Process files in parallel batches
+  // --no-session-persistence on every spawn = zero history entries, no session management needed
   const totalBatches = Math.ceil(toIndex.length / PARALLEL_LIMIT);
   const filesToSync = [];
   const newCache = { ...cache };
@@ -573,7 +549,7 @@ export async function buildIndex(projectPath, options = {}) {
     console.log(chalk.gray(`     ✅ Batch ${batchNum} done\n`));
   }
 
-  // Include unchanged files in sync (full sync to RAAG)
+  // Include unchanged files in sync
   for (const filePath of files) {
     const relativePath = path.relative(projectPath, filePath);
     if (filesToSync.some(f => f.path === relativePath)) continue;
@@ -594,7 +570,6 @@ export async function buildIndex(projectPath, options = {}) {
     }
   }
 
-  // Step 1: Upload files to KB FIRST
   console.log(chalk.bold(`  🔄 Uploading ${filesToSync.length} files to RAAG...`));
 
   try {
@@ -606,19 +581,19 @@ export async function buildIndex(projectPath, options = {}) {
       chalk.gray(`${syncResult.deleted?.length || 0} deleted`)
     );
 
-    // Step 2: Build or rebuild RAG AFTER files are on disk
     if (needsFullBuild) {
-      // First time or empty RAG — build fresh (files are now on disk)
       await buildRAGAfterUpload(projectPath, raag, kbConfig);
     } else if (syncResult.rebuild_triggered) {
-      // Incremental rebuild was triggered by sync
       console.log(chalk.gray('  🔨 RAG incremental rebuild triggered'));
       console.log(chalk.gray('  Waiting for rebuild...'));
       await raag.waitForReady();
       console.log(chalk.green('  ✅ RAG rebuild complete'));
     } else {
-      // Files changed but no auto-rebuild — trigger manually
-      const hasChanges = (syncResult.added?.length || 0) + (syncResult.updated?.length || 0) + (syncResult.deleted?.length || 0) > 0;
+      const hasChanges =
+        (syncResult.added?.length || 0) +
+        (syncResult.updated?.length || 0) +
+        (syncResult.deleted?.length || 0) > 0;
+
       if (hasChanges) {
         console.log(chalk.gray('  🔨 Triggering RAG rebuild...'));
         try {
@@ -627,7 +602,6 @@ export async function buildIndex(projectPath, options = {}) {
           await raag.waitForReady();
           console.log(chalk.green('  ✅ RAG rebuild complete'));
         } catch (err) {
-          // If incremental fails, do full rebuild
           console.log(chalk.yellow(`  ⚠  Incremental rebuild failed, doing full rebuild...`));
           await buildRAGAfterUpload(projectPath, raag, kbConfig);
         }
@@ -638,7 +612,6 @@ export async function buildIndex(projectPath, options = {}) {
     process.exit(1);
   }
 
-  // Final summary
   console.log('');
   console.log(chalk.green('  ✅ Index complete'));
   console.log(chalk.gray(`     Files indexed : ${toIndex.length}`));
