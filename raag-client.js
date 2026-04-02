@@ -216,6 +216,24 @@ class RaagClient {
       return false;
     }
   }
+
+  /**
+   * List all Knowledge Bases for this account.
+   * @returns {Promise<Array<{id: string, name: string, ...}>>}
+   */
+  async listKBs() {
+    const data = await this._requestWithRetry('GET', '/kb?limit=100');
+    return data.items || [];
+  }
+
+  /**
+   * List all RAG models for this account.
+   * @returns {Promise<Array<{id: string, name: string, status: string, kb_ids: string[], ...}>>}
+   */
+  async listRAGs() {
+    const data = await this._requestWithRetry('GET', '/rag?limit=100');
+    return data.items || [];
+  }
 }
 
 // ─────────────────────────────────────────
