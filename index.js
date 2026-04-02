@@ -7,7 +7,6 @@
  * Modes:
  *   enhance --init [path]          → Index project (auto-create KB + RAG in RAAG)
  *   enhance --set-project /path    → Save default project
- *   enhance --watch                → Watch for changes, auto-sync to RAAG
  *   enhance --status               → Show RAAG connection + project info
  *   enhance "raw prompt"           → Enhance using RAAG semantic search
  */
@@ -96,7 +95,7 @@ function printHelp() {
   console.log(chalk.bold('  Usage:'));
   console.log('');
   console.log(chalk.cyan('  enhance --init [/path/to/project]'));
-  console.log(chalk.gray('    → Index project: scan files, upload to RAAG, build search'));
+  console.log(chalk.gray('    → Index project: scan files, extract comments, upload to RAAG'));
   console.log('');
   console.log(chalk.cyan('  enhance your raw prompt'));
   console.log(chalk.gray('    → Enhance a prompt using RAAG semantic search + Claude'));
@@ -114,15 +113,9 @@ function printHelp() {
 // ─────────────────────────────────────────
 
 function askQuestion(prompt) {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   return new Promise((resolve) => {
-    rl.question(prompt, (answer) => {
-      rl.close();
-      resolve(answer.trim());
-    });
+    rl.question(prompt, (answer) => { rl.close(); resolve(answer.trim()); });
   });
 }
 
@@ -140,7 +133,6 @@ async function ensureApiKey() {
     return false;
   }
 
-  // Validate key
   const spinner = ora({ text: chalk.gray('Validating API key...'), color: 'cyan' }).start();
 
   try {
@@ -204,7 +196,6 @@ async function runInit(args) {
   if (projectPath) {
     projectPath = path.resolve(projectPath);
   } else {
-    // Auto-detect: use CWD
     projectPath = process.cwd();
   }
 
@@ -213,11 +204,10 @@ async function runInit(args) {
     process.exit(1);
   }
 
-  // Save as default project
   setProjectPath(projectPath);
 
   console.log(chalk.bold(`\n  Indexing: ${projectPath}`));
-  console.log(chalk.gray('  Scanning files → Claude summaries → Upload to RAAG\n'));
+  console.log(chalk.gray('  Scanning files → extracting comments → uploading to RAAG\n'));
 
   await buildIndex(projectPath, { verbose: false, force });
 }
@@ -229,7 +219,6 @@ async function runInit(args) {
 async function runEnhance(rawPrompt, { searchOnly = false } = {}) {
   printBanner();
 
-  // Project must be initialized — check CWD for .claude/raag.json
   const cwdRaagJson = path.join(process.cwd(), '.claude', 'raag.json');
   if (!fs.existsSync(cwdRaagJson)) {
     printError('No project found. Run `enhance --init` in your project directory first.');
@@ -237,7 +226,6 @@ async function runEnhance(rawPrompt, { searchOnly = false } = {}) {
   }
   const projectPath = process.cwd();
 
-  // Step 1: Find relevant files via RAAG
   const spinner = ora({
     text: chalk.gray('Searching codebase via RAAG...'),
     color: 'cyan',
@@ -259,7 +247,6 @@ async function runEnhance(rawPrompt, { searchOnly = false } = {}) {
 
   spinner.stop();
 
-  // -s flag: return RAAG results immediately, no Claude
   if (searchOnly) {
     printSearchResults(matchResult);
     return;
@@ -271,7 +258,6 @@ async function runEnhance(rawPrompt, { searchOnly = false } = {}) {
     color: 'cyan',
   }).start();
 
-  // Step 2: Enhance with Claude
   const context = matchResult.context || 'No codebase context available.';
   const result = await enhancePrompt(rawPrompt, context);
 
@@ -282,7 +268,6 @@ async function runEnhance(rawPrompt, { searchOnly = false } = {}) {
     process.exit(1);
   }
 
-  // Step 3: Output
   if (result.type === 'needs_context') {
     printNeedsContext(result.question);
   } else {
@@ -313,7 +298,6 @@ async function runStatus() {
     console.log(chalk.gray('  RAG ID    : ') + chalk.white(proj.ragId || 'N/A'));
   }
 
-  // Test connection
   if (config.apiKey) {
     const client = getRaagClient(config.projectPath);
     if (client) {
@@ -332,45 +316,24 @@ async function runStatus() {
 async function main() {
   const args = process.argv.slice(2);
 
-  if (args.length === 0) {
-    printHelp();
-    process.exit(0);
-  }
-
-  if (args.includes('--help') || args.includes('-h')) {
-    printHelp();
-    process.exit(0);
-  }
-
-  if (args[0] === '--status') {
-    await runStatus();
-    process.exit(0);
-  }
+  if (args.length === 0) { printHelp(); process.exit(0); }
+  if (args.includes('--help') || args.includes('-h')) { printHelp(); process.exit(0); }
+  if (args[0] === '--status') { await runStatus(); process.exit(0); }
 
   if (args[0] === '--set-project') {
-    const projectPath = args.slice(1).join(' ').trim();
-    runSetProject(projectPath);
+    runSetProject(args.slice(1).join(' ').trim());
     process.exit(0);
   }
 
-  // Everything below requires an API key
   const hasKey = await ensureApiKey();
   if (!hasKey) process.exit(1);
 
-  if (args[0] === '--init') {
-    await runInit(args.slice(1));
-    process.exit(0);
-  }
+  if (args[0] === '--init') { await runInit(args.slice(1)); process.exit(0); }
 
-
-  // Default: enhance prompt
   const searchOnly = args.includes('-s');
   const rawPrompt = args.filter(a => a !== '-s').join(' ').trim();
 
-  if (!rawPrompt) {
-    printHelp();
-    process.exit(0);
-  }
+  if (!rawPrompt) { printHelp(); process.exit(0); }
 
   await runEnhance(rawPrompt, { searchOnly });
 }

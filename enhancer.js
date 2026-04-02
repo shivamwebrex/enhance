@@ -1,14 +1,12 @@
 /**
  * enhancer.js
  * -----------
- * Takes raw prompt + matched file contexts.
- * Calls Claude Code via spawn + stdin (same pattern as indexer.js)
- * for true async non-blocking execution.
+ * Takes raw prompt + matched file summaries (never source code).
+ * Calls Claude via spawn + stdin with --no-session-persistence
+ * so enhancement calls never appear in local Claude history.
  *
- * Using spawn instead of execSync:
- *   - Non-blocking — doesn't freeze the process
- *   - No shell argument length limits
- *   - Same pattern that achieves true parallelism in indexer.js
+ * This is the ONLY file in the project that calls Claude.
+ * One call per enhance invocation. Context capped at ~3,000 tokens.
  */
 
 import { spawn } from 'child_process';
@@ -18,6 +16,11 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SYSTEM_PROMPT_PATH = path.join(__dirname, 'system_prompt.txt');
+
+// Hard cap on context sent to Claude
+// Prevents runaway tokens if RAAG returns unexpectedly large chunks
+// ~3,000 tokens × 4 chars/token = 12,000 chars
+const MAX_CONTEXT_CHARS = 12000;
 
 // ─────────────────────────────────────────
 // Load System Prompt
@@ -31,17 +34,28 @@ function loadSystemPrompt() {
 }
 
 // ─────────────────────────────────────────
+// Cap context size
+// ─────────────────────────────────────────
+
+function capContext(context) {
+  if (context.length <= MAX_CONTEXT_CHARS) return context;
+  return context.slice(0, MAX_CONTEXT_CHARS) + '\n\n[Context truncated — showing top matches only]';
+}
+
+// ─────────────────────────────────────────
 // Build Full Prompt
 // ─────────────────────────────────────────
 
 function buildFullPrompt(systemPrompt, rawPrompt, codebaseContext) {
+  const safeContext = capContext(codebaseContext);
+
   return `${systemPrompt}
 
 ═══════════════════════════════════════════
 CODEBASE CONTEXT (from project index)
 ═══════════════════════════════════════════
 
-${codebaseContext}
+${safeContext}
 
 ═══════════════════════════════════════════
 RAW PROMPT FROM DEVELOPER
@@ -56,7 +70,7 @@ OUTPUT: Enhanced prompt only. No explanation. No preamble.
 
 // ─────────────────────────────────────────
 // Call Claude via spawn + stdin
-// Same pattern as indexer.js askClaudeSpawn
+// --no-session-persistence: zero history entries
 // ─────────────────────────────────────────
 
 function callClaude(fullPrompt) {
@@ -64,37 +78,31 @@ function callClaude(fullPrompt) {
     let stdout = '';
     let timedOut = false;
 
-    const child = spawn('claude', ['-p', '-'], {
+    const child = spawn('claude', ['-p', '--no-session-persistence', '-'], {
       shell: true,
       windowsHide: true,
     });
 
-    // 60s timeout
     const timer = setTimeout(() => {
       timedOut = true;
       try { child.kill(); } catch {}
       resolve({ success: false, error: 'Claude call timed out after 60s' });
     }, 60000);
 
-    // Write prompt to stdin
     child.stdin.write(fullPrompt, 'utf8');
     child.stdin.end();
 
-    child.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
+    child.stdout.on('data', (data) => { stdout += data.toString(); });
 
-    child.on('close', (code) => {
+    child.on('close', () => {
       clearTimeout(timer);
       if (timedOut) return;
 
       const output = stdout.trim();
-
       if (!output) {
         resolve({ success: false, error: 'Claude returned empty output' });
         return;
       }
-
       resolve({ success: true, output });
     });
 

@@ -1,24 +1,20 @@
 /**
  * indexer.js
  * ----------
- * Scans a project, generates Claude summaries, and uploads to RAAG.
+ * Scans a project, extracts summaries from code comments, and uploads to RAAG.
  *
  * For each file:
- *   1. Extract structure (functions, imports, exports) — no Claude
- *   2. Claude writes a detailed summary from the extract
- *   3. Prepend summary to file content and upload to RAAG KB
+ *   1. Extract comment+function pairs — pure regex, zero API cost
+ *   2. Build summary from developer-written comments (primary)
+ *   3. Fallback to exports/functions header if no comments found
+ *   4. Prepend summary to file content and upload to RAAG KB
  *
- * Auto-creates KB + RAG model in RAAG on first init.
- * No local index file — RAAG is the single source of truth.
- *
- * Uses --no-session-persistence on every Claude spawn so summaries
- * never appear in local Claude history. Zero clutter, zero session
- * management, full parallel processing.
+ * Zero Claude calls during --init or lazy sync.
+ * Claude fires once only — in enhancer.js when writing the enhanced prompt.
  */
 
 import fs from 'fs';
 import path from 'path';
-import { spawn } from 'child_process';
 import { glob } from 'glob';
 import chalk from 'chalk';
 import { getRaagClient } from './raag-client.js';
@@ -37,23 +33,180 @@ const SKIP_DIRS = [
 ];
 
 const MAX_FILE_SIZE_KB = 100;
-const PARALLEL_LIMIT = 10;
+const PARALLEL_LIMIT = 20;
 const CACHE_FILENAME = '.enhance-cache.json';
 
 // ─────────────────────────────────────────
-// Step 1: Extract structure from file (no Claude)
+// Step 1: Extract comment + function pairs
 // ─────────────────────────────────────────
 
+/**
+ * Walks file line by line and pairs comment blocks with the function below them.
+ * Handles JSDoc (/** ), block comments (/* ), and single-line (//) styles.
+ * Returns array of { fn, comment } objects.
+ */
+export function extractCommentsWithFunctions(content) {
+  const lines = content.split('\n');
+  const pairs = [];
+  let pendingComment = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    // Accumulate comment lines
+    if (
+      trimmed.startsWith('/**') ||
+      trimmed.startsWith('/*') ||
+      trimmed.startsWith('* ') ||
+      trimmed === '*' ||
+      trimmed.startsWith('//')
+    ) {
+      const clean = trimmed.replace(/^[/*\s]+/, '').trim();
+      // Skip JSDoc tags (@param, @returns, etc) and very short noise
+      if (clean.length > 4 && !clean.startsWith('@')) {
+        pendingComment.push(clean);
+      }
+      continue;
+    }
+
+    // Function/const arrow line — pair with accumulated comment
+    if (pendingComment.length > 0) {
+      const fnMatch = trimmed.match(
+        /(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+(\w+)|(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s+)?(?:\(|function)/
+      );
+
+      if (fnMatch) {
+        const fnName = fnMatch[1] || fnMatch[2];
+        const comment = pendingComment.join(' ').slice(0, 200);
+        if (fnName && comment) {
+          pairs.push({ fn: fnName, comment });
+        }
+      }
+    }
+
+    // Reset comment buffer on any non-comment, non-blank line
+    if (trimmed.length > 0) {
+      pendingComment = [];
+    }
+  }
+
+  return pairs;
+}
+
+// ─────────────────────────────────────────
+// Step 2: Build summary from comments (primary — zero API cost)
+// ─────────────────────────────────────────
+
+/**
+ * Builds a semantic summary from developer-written comments.
+ * Returns { summary, keywords } or null if no usable comments found.
+ */
+export function buildSummaryFromComments(filePath, content) {
+  // Extract file-level comment block (first comment at top of file)
+  const fileCommentMatch = content.match(/^(?:\/\*\*?[\s\S]*?\*\/|(?:\/\/[^\n]*\n){1,8})/);
+  const fileComment = fileCommentMatch
+    ? fileCommentMatch[0]
+        .replace(/\/\*\*?|\*\//g, '')
+        .replace(/^\s*\/\/\s?/gm, '')
+        .replace(/^\s*\*\s?/gm, '')
+        .trim()
+        .split('\n')
+        .map(l => l.trim())
+        .filter(l => l.length > 4 && !l.startsWith('@'))
+        .slice(0, 4)
+        .join(' ')
+    : '';
+
+  // Extract per-function comment pairs
+  const pairs = extractCommentsWithFunctions(content);
+
+  if (pairs.length === 0 && !fileComment) {
+    return null; // no comments found — caller will use fallback
+  }
+
+  const parts = [];
+  if (fileComment) parts.push(fileComment);
+
+  pairs.slice(0, 12).forEach(p => {
+    parts.push(`${p.fn}: ${p.comment}`);
+  });
+
+  // Keywords: function names + meaningful words from comments
+  const fnNames = pairs.map(p => p.fn.toLowerCase());
+
+  const stopWords = new Set([
+    'this', 'that', 'with', 'from', 'when', 'then', 'will', 'should',
+    'returns', 'return', 'param', 'and', 'the', 'for', 'are', 'used',
+    'called', 'each', 'all', 'any', 'into', 'after', 'before', 'based',
+  ]);
+
+  const commentWords = pairs
+    .flatMap(p => p.comment.toLowerCase().split(/\W+/))
+    .filter(w => w.length > 4 && !stopWords.has(w));
+
+  const keywords = [...new Set([...fnNames, ...commentWords])].slice(0, 12);
+
+  return {
+    summary: parts.join('\n'),
+    keywords,
+  };
+}
+
+// ─────────────────────────────────────────
+// Step 3: Fallback — exports/functions header (no comments found)
+// ─────────────────────────────────────────
+
+/**
+ * Fallback for files with no comment blocks.
+ * Uses extracted structure to build a structural header.
+ * Still zero API cost.
+ */
+export function buildFallbackSummary(extracted) {
+  const parts = [];
+
+  if (extracted.classNames?.length > 0) {
+    parts.push(`Classes: ${extracted.classNames.join(', ')}.`);
+  }
+  if (extracted.functions.length > 0) {
+    parts.push(`Functions: ${extracted.functions.join(', ')}.`);
+  }
+  if (extracted.exports.length > 0) {
+    parts.push(`Exports: ${extracted.exports.join(', ')}.`);
+  }
+  if (extracted.imports.length > 0) {
+    parts.push(`Imports from: ${extracted.imports.slice(0, 10).join(', ')}.`);
+  }
+  if (extracted.variables.length > 0) {
+    parts.push(`Key variables: ${extracted.variables.join(', ')}.`);
+  }
+
+  return {
+    summary: parts.join('\n') || `File: ${extracted.path}`,
+    keywords: [
+      ...extracted.functions.slice(0, 5),
+      ...extracted.exports.slice(0, 3),
+      ...(extracted.classNames || []).slice(0, 2),
+    ].map(k => k.toLowerCase()).filter(Boolean),
+  };
+}
+
+// ─────────────────────────────────────────
+// Step 4: Extract structure for cache sig
+// ─────────────────────────────────────────
+
+/**
+ * Extracts structural elements (functions, imports, exports) from file.
+ * Used only for structureSig cache invalidation in sync.js.
+ * Not sent to any API.
+ */
 export function extractFileStructure(filePath, content) {
   const lines = content.split('\n');
   const extracted = {
     path: filePath,
     functions: [],
-    functionSignatures: [],
     classNames: [],
     imports: [],
     exports: [],
-    comments: [],
     variables: [],
   };
 
@@ -66,18 +219,7 @@ export function extractFileStructure(filePath, content) {
       trimmed.match(/^(export\s+)?const\s+\w+\s*=\s*(async\s+)?function/)
     ) {
       const match = trimmed.match(/(?:function|const)\s+(\w+)/);
-      if (match) {
-        extracted.functions.push(match[1]);
-        extracted.functionSignatures.push(trimmed.slice(0, 120));
-      }
-    }
-
-    if (trimmed.match(/^\w+\s*[=:]\s*(async\s+)?\(.*\)\s*=>/)) {
-      const match = trimmed.match(/^(\w+)\s*[=:]/);
-      if (match) {
-        extracted.functions.push(match[1]);
-        extracted.functionSignatures.push(trimmed.slice(0, 120));
-      }
+      if (match) extracted.functions.push(match[1]);
     }
 
     if (trimmed.match(/^(export\s+)?(default\s+)?class\s+\w+/)) {
@@ -95,13 +237,6 @@ export function extractFileStructure(filePath, content) {
       if (match) extracted.exports.push(match[1]);
     }
 
-    if (trimmed.startsWith('//') || trimmed.startsWith('*')) {
-      const comment = trimmed.replace(/^[/*\s]+/, '').trim();
-      if (comment.length > 10 && comment.length < 100) {
-        extracted.comments.push(comment);
-      }
-    }
-
     if (trimmed.match(/^(const|let)\s+\w+\s*=\s*(create|createSlice|useState|useReducer|atom)/)) {
       const match = trimmed.match(/^(?:const|let)\s+(\w+)/);
       if (match) extracted.variables.push(match[1]);
@@ -109,168 +244,24 @@ export function extractFileStructure(filePath, content) {
   }
 
   extracted.functions = [...new Set(extracted.functions)].slice(0, 50);
-  extracted.functionSignatures = [...new Set(extracted.functionSignatures)].slice(0, 50);
   extracted.classNames = [...new Set(extracted.classNames)].slice(0, 20);
   extracted.imports = [...new Set(extracted.imports)].slice(0, 30);
   extracted.exports = [...new Set(extracted.exports)].slice(0, 30);
-  extracted.comments = [...new Set(extracted.comments)].slice(0, 20);
   extracted.variables = [...new Set(extracted.variables)].slice(0, 30);
 
   return extracted;
 }
 
 // ─────────────────────────────────────────
-// Step 2: Claude spawn — no history, no session
-// ─────────────────────────────────────────
-
-/**
- * Spawns Claude in print mode with --no-session-persistence.
- * Response is returned as plain text. Nothing is saved to disk.
- * Zero history entries regardless of how many files are indexed.
- */
-export function askClaudeSpawn(prompt) {
-  return new Promise((resolve) => {
-    let stdout = '';
-    let timedOut = false;
-
-    const child = spawn('claude', ['-p', '--no-session-persistence', '-'], {
-      shell: true,
-      windowsHide: true,
-    });
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try { child.kill(); } catch {}
-      resolve(null);
-    }, 90000);
-
-    child.stdin.write(prompt, 'utf8');
-    child.stdin.end();
-
-    child.stdout.on('data', (data) => { stdout += data.toString(); });
-
-    child.on('close', () => {
-      clearTimeout(timer);
-      if (timedOut) return;
-      resolve(stdout.trim() || null);
-    });
-
-    child.on('error', () => {
-      clearTimeout(timer);
-      resolve(null);
-    });
-  });
-}
-
-// ─────────────────────────────────────────
-// Step 3: Generate summary via Claude
-// ─────────────────────────────────────────
-
-export function buildFallbackSummary(extracted) {
-  const parts = [];
-  parts.push(`This file is located at ${extracted.path}.`);
-
-  if (extracted.classNames?.length > 0) {
-    parts.push(`\nClasses: ${extracted.classNames.join(', ')}.`);
-  }
-  if (extracted.functions.length > 0) {
-    parts.push(`\nFunctions defined: ${extracted.functions.join(', ')}.`);
-  }
-  if (extracted.functionSignatures?.length > 0) {
-    parts.push(`\nFunction signatures:\n${extracted.functionSignatures.join('\n')}`);
-  }
-  if (extracted.imports.length > 0) {
-    parts.push(`\nImports from: ${extracted.imports.join(', ')}.`);
-  }
-  if (extracted.exports.length > 0) {
-    parts.push(`\nExports: ${extracted.exports.join(', ')}.`);
-  }
-  if (extracted.variables.length > 0) {
-    parts.push(`\nKey variables: ${extracted.variables.join(', ')}.`);
-  }
-
-  return {
-    summary: parts.join('\n'),
-    keywords: [
-      ...extracted.functions.slice(0, 5),
-      ...extracted.exports.slice(0, 3),
-      ...(extracted.classNames || []).slice(0, 2),
-    ].map(k => k.toLowerCase()).filter(Boolean),
-  };
-}
-
-export async function getSummaryFromClaude(extracted, content) {
-  const prompt = `You are generating a detailed documentation summary for a source code file. A developer should be able to understand this file completely from your summary alone.
-
-File: ${extracted.path}
-
-=== EXTRACTED STRUCTURE ===
-Function signatures:
-${extracted.functionSignatures?.join('\n') || 'none'}
-Classes: ${extracted.classNames?.join(', ') || 'none'}
-Imports: ${extracted.imports.join(', ') || 'none'}
-Exports: ${extracted.exports.join(', ') || 'none'}
-Key variables: ${extracted.variables.join(', ') || 'none'}
-Comments: ${extracted.comments.join(' | ') || 'none'}
-
-=== SOURCE CODE ===
-${content}
-
-Write a comprehensive summary covering ALL of the following:
-
-1. PURPOSE: What this file does and its role in the project (1-2 sentences)
-2. KEY VARIABLES & CONSTANTS: List each important variable/constant, its type/value, and what it controls
-3. FUNCTIONS: For each function, describe what it does, its parameters, return value, and key logic
-4. CALL GRAPH: Which functions call which other functions within this file
-5. EXTERNAL DEPENDENCIES: What is imported and how it's used
-6. EXPORTS: What this file exposes to other modules
-7. KEY PATTERNS: Design patterns, error handling, async patterns used
-8. DATA FLOW: How data moves through the file from input to output
-
-Be thorough. No word limit. Write as much detail as needed for a developer to fully understand this file.
-
-Respond in this exact format:
-SUMMARY_START
-<your detailed summary here>
-SUMMARY_END
-KEYWORDS: <keyword1, keyword2, keyword3, ...>`;
-
-  const output = await askClaudeSpawn(prompt);
-
-  if (!output) return buildFallbackSummary(extracted);
-
-  let summaryMatch = output.match(/SUMMARY_START\s*\n([\s\S]*?)\nSUMMARY_END/);
-  if (!summaryMatch) {
-    summaryMatch = output.match(/SUMMARY_START\s*\n([\s\S]*)/);
-  }
-  const keywordsMatch = output.match(/KEYWORDS:\s*(.+)/);
-
-  if (summaryMatch && summaryMatch[1].trim()) {
-    return {
-      summary: summaryMatch[1].trim(),
-      keywords: keywordsMatch
-        ? keywordsMatch[1].split(',').map(k => k.trim().toLowerCase()).filter(Boolean)
-        : [],
-    };
-  }
-
-  return buildFallbackSummary(extracted);
-}
-
-// ─────────────────────────────────────────
 // Format content for RAAG KB
 // ─────────────────────────────────────────
 
-function getCommentPrefix(filePath) {
-  const ext = path.extname(filePath).toLowerCase();
-  if (['.py', '.rb'].includes(ext)) return '# ';
-  return '// ';
-}
-
+/**
+ * Prepends summary block to raw source.
+ * RAAG gets: summary + keywords + raw source.
+ * matcher.js extracts summary only before sending to Claude.
+ */
 export function prependSummary(content, summary, keywords, filePath) {
-  const prefix = getCommentPrefix(filePath);
-  const commentedCode = content.split('\n').map(line => prefix + line).join('\n');
-
   return [
     `=== FILE: ${filePath} ===`,
     '',
@@ -278,8 +269,8 @@ export function prependSummary(content, summary, keywords, filePath) {
     '',
     `=== KEYWORDS: ${keywords.join(', ')} ===`,
     '',
-    `=== SOURCE CODE (reference) ===`,
-    commentedCode,
+    `=== SOURCE CODE ===`,
+    content,
   ].join('\n');
 }
 
@@ -379,18 +370,62 @@ function writeProjectFiles(projectPath, projConfig) {
   const commandsDir = path.join(claudeDir, 'commands');
   fs.mkdirSync(commandsDir, { recursive: true });
 
-  const content = `You MUST run this bash command first before doing anything else. Do NOT explore, search, or read files yourself. Just run this command:
+  const content = `# Enhance Prompt
+
+Run this command first — do not explore the project yourself:
 
 \`\`\`bash
 enhance "$ARGUMENTS"
 \`\`\`
 
-Wait for the command output. Then:
+---
 
-1. Display the enhanced prompt from the output to the user
-2. Ask the user: "Proceed with this enhanced prompt, or would you like to edit it?"
-3. Only after user confirms, answer the enhanced prompt by reading files and providing fixes
-4. Do NOT skip the command. Do NOT do your own codebase search instead.
+## Step 1 — Evaluate the output
+
+After running the command, check what came back:
+
+**If the enhanced prompt is specific** (mentions actual file paths, function names, variable names, or exact error locations) → go to Step 2.
+
+**If the enhanced prompt is vague** (generic debugging advice, no file references, or the score is below 40%) → do NOT proceed. Go to Step 1a.
+
+### Step 1a — Ask clarifying questions first
+
+When context is thin, ask the user these before doing anything:
+
+- What exact behaviour are you seeing vs what you expect?
+- Which file or feature area does this involve?
+- Did this break after a recent change? If so, what changed?
+- Have you seen any error messages or logs?
+
+Wait for answers. Then build an enhanced prompt yourself using their answers + the RAAG output. Show it to the user before proceeding.
+
+---
+
+## Step 2 — Validate the enhanced prompt
+
+Show the enhanced prompt to the user exactly as returned (or as you built it in Step 1a).
+
+Then ask:
+
+> "Does this capture what you're trying to do? Confirm to proceed, or tell me what to adjust."
+
+**Check before confirming:**
+- Does it reference real files from this codebase?
+- Does it describe the actual problem, not a generic version of it?
+- Is the expected behaviour clearly stated?
+
+If any of these are missing, flag it to the user and ask for the missing piece before proceeding.
+
+---
+
+## Step 3 — Execute only after confirmation
+
+Once the user confirms:
+
+1. Read only the files mentioned in the enhanced prompt
+2. Trace the specific functions or logic paths referenced
+3. Provide targeted fixes — do not do a broad codebase scan
+4. Do NOT re-run enhance or explore beyond what the prompt specifies
 `;
 
   fs.writeFileSync(path.join(commandsDir, 'enhance.md'), content);
@@ -398,6 +433,7 @@ Wait for the command output. Then:
 
 // ─────────────────────────────────────────
 // Main: Build Index + Upload to RAAG
+// Zero Claude calls — comment extraction only
 // ─────────────────────────────────────────
 
 export async function buildIndex(projectPath, options = {}) {
@@ -510,7 +546,7 @@ export async function buildIndex(projectPath, options = {}) {
   }
 
   // Process files in parallel batches
-  // --no-session-persistence on every spawn = zero history entries, no session management needed
+  // Comment extraction — no API calls, runs at full CPU speed
   const totalBatches = Math.ceil(toIndex.length / PARALLEL_LIMIT);
   const filesToSync = [];
   const newCache = { ...cache };
@@ -519,26 +555,33 @@ export async function buildIndex(projectPath, options = {}) {
     const batch = toIndex.slice(i, i + PARALLEL_LIMIT);
     const batchNum = Math.floor(i / PARALLEL_LIMIT) + 1;
 
-    console.log(`  📦 Batch ${batchNum}/${totalBatches} — ${batch.length} files`);
-    batch.forEach(f => console.log(chalk.gray(`     ${f.relativePath}`)));
+    process.stdout.write(chalk.gray(`  📦 Batch ${batchNum}/${totalBatches} — ${batch.length} files... `));
 
-    const results = await Promise.all(
-      batch.map(async ({ relativePath, content, mtime }) => {
-        const extracted = extractFileStructure(relativePath, content);
-        const { summary, keywords } = await getSummaryFromClaude(extracted, content);
+    const results = batch.map(({ relativePath, content, mtime }) => {
+      // Primary: extract developer-written comments
+      const commentResult = buildSummaryFromComments(relativePath, content);
 
-        const contentWithSummary = prependSummary(content, summary, keywords, relativePath);
-        const structureSig = [extracted.functions, extracted.imports, extracted.exports].flat().join('|');
+      // Fallback: structural header if no comments found
+      const extracted = extractFileStructure(relativePath, content);
+      const { summary, keywords } = commentResult || buildFallbackSummary(extracted);
 
-        return {
-          relativePath,
-          summary,
-          keywords,
-          contentWithSummary,
-          cache: { mtime, structureSig, summary, keywords },
-        };
-      })
-    );
+      // structureSig for cache invalidation
+      const structureSig = [
+        ...extracted.functions,
+        ...extracted.imports,
+        ...extracted.exports,
+      ].join('|');
+
+      const contentWithSummary = prependSummary(content, summary, keywords, relativePath);
+
+      return {
+        relativePath,
+        summary,
+        keywords,
+        contentWithSummary,
+        cache: { mtime, structureSig, summary, keywords },
+      };
+    });
 
     for (const r of results) {
       filesToSync.push({ path: r.relativePath, content: r.contentWithSummary });
@@ -546,10 +589,10 @@ export async function buildIndex(projectPath, options = {}) {
     }
 
     saveCache(projectPath, newCache);
-    console.log(chalk.gray(`     ✅ Batch ${batchNum} done\n`));
+    console.log(chalk.green('done'));
   }
 
-  // Include unchanged files in sync
+  // Include unchanged files in sync (needed for RAAG deletion detection)
   for (const filePath of files) {
     const relativePath = path.relative(projectPath, filePath);
     if (filesToSync.some(f => f.path === relativePath)) continue;
@@ -570,6 +613,7 @@ export async function buildIndex(projectPath, options = {}) {
     }
   }
 
+  console.log('');
   console.log(chalk.bold(`  🔄 Uploading ${filesToSync.length} files to RAAG...`));
 
   try {
@@ -618,5 +662,6 @@ export async function buildIndex(projectPath, options = {}) {
   console.log(chalk.gray(`     Files synced  : ${filesToSync.length}`));
   console.log(chalk.gray(`     Unchanged     : ${unchanged}`));
   console.log(chalk.gray(`     Skipped       : ${skipped}`));
+  console.log(chalk.gray(`     Claude calls  : 0`));
   console.log('');
 }
