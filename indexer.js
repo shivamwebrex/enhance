@@ -330,6 +330,7 @@ async function ensureKBAndRAG(projectPath, raag) {
   let projConfig = getProjectRaag(projectPath);
   const projectName = path.basename(projectPath);
 
+  // Fast path: local config has both IDs — verify RAG is still alive
   if (projConfig && projConfig.kbId && projConfig.ragId) {
     raag.kbId = projConfig.kbId;
     raag.ragId = projConfig.ragId;
@@ -352,13 +353,45 @@ async function ensureKBAndRAG(projectPath, raag) {
     }
   }
 
+  // Fast path: local config has kbId but no ragId — skip discovery, just build RAG
+  if (projConfig && projConfig.kbId && !projConfig.ragId) {
+    raag.kbId = projConfig.kbId;
+    return { ...projConfig, needsFullBuild: true };
+  }
+
+  // Discovery: no local config — check RAAG for existing KB/RAG by project name
+  if (!projConfig || !projConfig.kbId) {
+    const discovered = await discoverKBAndRAG(projectName, raag);
+
+    if (discovered.found) {
+      raag.kbId = discovered.kbId;
+      raag.ragId = discovered.ragId;
+
+      const savedConfig = { kbId: discovered.kbId, ragId: discovered.ragId, kbName: projectName };
+      writeProjectFiles(projectPath, savedConfig);
+
+      if (!discovered.needsFullBuild) {
+        console.log(chalk.green(`  ✅ Found existing KB "${projectName}" in RAAG (id: ${discovered.kbId})`));
+        console.log(chalk.green(`  ✅ Found existing RAG model (id: ${discovered.ragId}) — skipping full build`));
+        return { ...savedConfig, needsFullBuild: false };
+      }
+
+      console.log(chalk.green(`  ✅ Found existing KB "${projectName}" in RAAG — no RAG model yet, will build after sync`));
+      return { ...savedConfig, needsFullBuild: true };
+    }
+
+    if (discovered.error) {
+      console.log(chalk.yellow(`\n  ⚠  Could not check for existing KB: ${discovered.error}. Creating new KB...`));
+    }
+  }
+
+  // Create new KB
   console.log(chalk.gray(`\n  Creating KB "${projectName}" in RAAG...`));
   const kb = await raag.createKB(projectName, `Codebase index for ${projectName}`);
   raag.kbId = kb.id;
   console.log(chalk.green(`  ✅ KB created: ${kb.name} (${kb.id})`));
 
-  projConfig = { kbId: kb.id, ragId: null, kbName: projectName, needsFullBuild: true };
-  return projConfig;
+  return { kbId: kb.id, ragId: null, kbName: projectName, needsFullBuild: true };
 }
 
 async function buildRAGAfterUpload(projectPath, raag, projConfig) {
