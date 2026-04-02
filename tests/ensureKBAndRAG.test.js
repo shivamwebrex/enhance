@@ -1,7 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-// Import the helper once it is exported from indexer.js (Task 2 Step 3)
 import { discoverKBAndRAG } from '../indexer.js';
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -54,6 +53,16 @@ describe('discoverKBAndRAG', () => {
   it('returns found: false when listKBs throws (non-fatal)', async () => {
     const client = makeClient({
       listKBs: async () => { throw new Error('network error'); },
+    });
+
+    const result = await discoverKBAndRAG('myproject', client);
+    assert.equal(result.found, false);
+  });
+
+  it('returns found: false when listRAGs throws (non-fatal)', async () => {
+    const client = makeClient({
+      listKBs: async () => [{ id: 'kb-abc', name: 'myproject' }],
+      listRAGs: async () => { throw new Error('network error'); },
     });
 
     const result = await discoverKBAndRAG('myproject', client);

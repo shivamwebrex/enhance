@@ -321,8 +321,8 @@ export async function discoverKBAndRAG(projectName, raag) {
       return { found: true, kbId: kb.id, ragId: rag.id, needsFullBuild: false };
     }
     return { found: true, kbId: kb.id, ragId: null, needsFullBuild: true };
-  } catch {
-    return { found: false };
+  } catch (err) {
+    return { found: false, error: err.message };
   }
 }
 
