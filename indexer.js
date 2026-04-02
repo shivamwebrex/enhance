@@ -300,6 +300,32 @@ function saveCache(projectPath, cache) {
 // RAAG: Auto-create KB + RAG
 // ─────────────────────────────────────────
 
+/**
+ * Discover an existing KB and RAG in RAAG by project name.
+ * Best-effort: returns { found: false } on any error.
+ *
+ * @param {string} projectName - Folder name of the project
+ * @param {RaagClient} raag - RAAG client instance
+ * @returns {Promise<{found: boolean, kbId?: string, ragId?: string, needsFullBuild?: boolean}>}
+ */
+export async function discoverKBAndRAG(projectName, raag) {
+  try {
+    const kbs = await raag.listKBs();
+    const kb = kbs.find(k => k.name === projectName);
+    if (!kb) return { found: false };
+
+    const rags = await raag.listRAGs();
+    const rag = rags.find(r => r.status === 'ready' && r.kb_ids?.includes(kb.id));
+
+    if (rag) {
+      return { found: true, kbId: kb.id, ragId: rag.id, needsFullBuild: false };
+    }
+    return { found: true, kbId: kb.id, ragId: null, needsFullBuild: true };
+  } catch {
+    return { found: false };
+  }
+}
+
 async function ensureKBAndRAG(projectPath, raag) {
   let projConfig = getProjectRaag(projectPath);
   const projectName = path.basename(projectPath);
